@@ -103,28 +103,27 @@ export async function initDb(client: Client): Promise<Db> {
   return drizzle(client, { schema });
 }
 
-export function createDb(url: string, authToken?: string): Promise<Db> {
-  return initDb(createClient({ url, authToken }));
-}
-
-/**
- * Where the database lives. Locally this defaults to a SQLite file. Hosted
- * platforms such as Vercel have a read-only filesystem, so there a libSQL
- * server (Turso) is required. The TURSO_* names are what Vercel's Turso
- * integration sets, so connecting that integration works with no renaming.
- */
-export function databaseConfig(env: Record<string, string | undefined> = process.env) {
+export function databaseConfig(
+  env: Record<string, string | undefined> = process.env,
+): { url: string; authToken: string | undefined } {
   const url = env.DATABASE_URL || env.TURSO_DATABASE_URL;
-  const authToken = env.DATABASE_AUTH_TOKEN || env.TURSO_AUTH_TOKEN || undefined;
-  if (url) return { url, authToken };
+  const authToken = env.DATABASE_AUTH_TOKEN || env.TURSO_AUTH_TOKEN;
+
+  if (url) {
+    return { url, authToken };
+  }
+
   if (env.VERCEL) {
     throw new Error(
-      "No database configured. Vercel's filesystem is read-only, so the local SQLite file " +
-        "can't be used. Set DATABASE_URL and DATABASE_AUTH_TOKEN (or connect the Turso " +
-        "integration) in the Vercel project's environment variables, then redeploy.",
+      "Missing database configuration on Vercel: set DATABASE_URL (and DATABASE_AUTH_TOKEN) or connect Turso to set TURSO_DATABASE_URL (and TURSO_AUTH_TOKEN).",
     );
   }
+
   return { url: "file:local.db", authToken: undefined };
+}
+
+export function createDb(url: string, authToken?: string): Promise<Db> {
+  return initDb(createClient({ url, authToken }));
 }
 
 // Cached on globalThis so dev hot-reloads reuse one connection.
@@ -132,12 +131,8 @@ const globalForDb = globalThis as unknown as { __db?: Promise<Db> };
 
 export function getDb(): Promise<Db> {
   if (!globalForDb.__db) {
-    const { url, authToken } = databaseConfig();
-    globalForDb.__db = createDb(url, authToken).catch((error) => {
-      // Don't cache a failed connection: let the next request try again.
-      globalForDb.__db = undefined;
-      throw error;
-    });
+    const { url, authToken } = databaseConfig(process.env);
+    globalForDb.__db = createDb(url, authToken);
   }
   return globalForDb.__db;
 }
