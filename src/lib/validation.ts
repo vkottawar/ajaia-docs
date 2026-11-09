@@ -60,4 +60,15 @@ export const commentSchema = z.object({
 
 export const resolveCommentSchema = z.object({ resolved: z.boolean() });
 
+const position = z.number().int().min(0).max(MAX_CONTENT_BYTES);
+
+export const heartbeatSchema = z.object({
+  cursor: z
+    .object({ anchor: position, head: position, version: z.number().int().positive() })
+    .nullable()
+    .optional(),
+});
+
+export type CursorPosition = NonNullable<z.infer<typeof heartbeatSchema>["cursor"]>;
+
 export const EMPTY_DOC: DocContent = { type: "doc", content: [{ type: "paragraph" }] };

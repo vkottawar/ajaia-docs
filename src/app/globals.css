@@ -120,3 +120,34 @@ body {
     display: none;
   }
 }
+
+/* Other people's cursors (see src/lib/remote-cursors.ts) */
+.remote-caret {
+  position: relative;
+  margin-left: -1px;
+  margin-right: -1px;
+  border-left: 2px solid var(--cursor-color);
+  pointer-events: none;
+  user-select: none;
+}
+.remote-caret-label {
+  position: absolute;
+  bottom: 100%;
+  left: -2px;
+  padding: 1px 5px;
+  border-radius: 4px 4px 4px 0;
+  background: var(--cursor-color);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+@media print {
+  .remote-caret {
+    display: none;
+  }
+  .remote-selection {
+    background: none !important;
+  }
+}

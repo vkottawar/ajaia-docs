@@ -50,8 +50,9 @@ There are no passwords. The login page lists three seeded users; click one to si
 5. Sign in as **Carol** to confirm she can't see it, even with the direct URL.
 
 To see the collaboration features, keep both users open side by side (one in a private
-window): each sees the other's avatar, Bob's view updates a few seconds after Alice types,
-and comments left by either appear in the other's Comments panel.
+window, since all tabs in one browser share the same sign-in): each sees the other's avatar
+and named cursor, Bob's view updates a second or two after Alice stops typing, and comments
+left by either appear in the other's Comments panel.
 
 To see conflict handling, open the same document as Alice and as Bob (editor) in
 two windows and type in both: the second save is rejected and that window is
@@ -69,9 +70,11 @@ asked to reload, rather than one person silently overwriting the other.
   styles; text that is merely made large or prefixed with a typed bullet comes in as plain paragraphs.
 - **Sharing:** the owner can grant view or edit access by email, change the role, and remove
   access. Only the owner can share or delete.
-- **Who's here:** avatars next to the save status show other people with the document open.
-  If someone else saves and you have nothing unsaved, their changes appear within about
-  five seconds. This is polling, not character-by-character co-editing.
+- **Who's here:** avatars next to the save status show other people with the document open,
+  and each person's cursor and text selection appears in everyone else's editor as a
+  coloured caret with their name. If someone else saves and you have nothing unsaved,
+  their changes appear within about two seconds. This is polling, not
+  character-by-character co-editing.
 - **Comments:** anyone with access, including viewers, can comment. Select text before
   opening the panel to quote it. Comments can be resolved, reopened and deleted.
 - **Version history** (owner and editors): one version per editing session. Preview any

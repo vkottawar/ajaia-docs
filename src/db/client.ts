@@ -55,6 +55,9 @@ const SCHEMA_SQL = [
      document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
      user_id TEXT NOT NULL REFERENCES users(id),
      last_seen INTEGER NOT NULL,
+     cursor_anchor INTEGER,
+     cursor_head INTEGER,
+     cursor_version INTEGER,
      PRIMARY KEY (document_id, user_id)
    )`,
   `CREATE INDEX IF NOT EXISTS versions_doc_idx ON document_versions(document_id, saved_at)`,
@@ -62,6 +65,25 @@ const SCHEMA_SQL = [
   `CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_id)`,
   `CREATE INDEX IF NOT EXISTS shares_user_idx ON document_shares(user_id)`,
 ];
+
+/** Columns added after the presence table first shipped. */
+const ADDED_PRESENCE_COLUMNS = {
+  cursor_anchor: "INTEGER",
+  cursor_head: "INTEGER",
+  cursor_version: "INTEGER",
+};
+
+/**
+ * `CREATE TABLE IF NOT EXISTS` doesn't change a table that already exists, so
+ * databases created before a column was added get it here.
+ */
+async function addMissingColumns(client: Client, table: string, columns: Record<string, string>) {
+  const info = await client.execute(`PRAGMA table_info(${table})`);
+  const existing = new Set(info.rows.map((row) => String(row.name)));
+  for (const [name, type] of Object.entries(columns)) {
+    if (!existing.has(name)) await client.execute(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+  }
+}
 
 /**
  * Creates tables if missing and seeds the demo users. Idempotent, so it runs
@@ -71,6 +93,7 @@ const SCHEMA_SQL = [
 export async function initDb(client: Client): Promise<Db> {
   await client.execute("PRAGMA foreign_keys = ON");
   for (const sql of SCHEMA_SQL) await client.execute(sql);
+  await addMissingColumns(client, "presence", ADDED_PRESENCE_COLUMNS);
   for (const u of SEED_USERS) {
     await client.execute({
       sql: "INSERT OR IGNORE INTO users (id, name, email) VALUES (?, ?, ?)",

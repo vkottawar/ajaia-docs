@@ -2,12 +2,23 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { canEdit } from "@/lib/access";
 import { api, ApiError } from "@/lib/api";
 import type { DocumentDetail } from "@/lib/documents";
 import { editorExtensions } from "@/lib/editor-extensions";
 import type { Heartbeat } from "@/lib/presence";
+import {
+  editCount,
+  mapAcrossReplace,
+  rebaseAfterSave,
+  RemoteCursors,
+  resetToSaved,
+  setRemoteCursors,
+  toSavedPosition,
+  type RemoteCursor,
+} from "@/lib/remote-cursors";
+import { colorFor } from "@/lib/user-colors";
 import { MAX_QUOTE_LENGTH, MAX_TITLE_LENGTH, type DocContent } from "@/lib/validation";
 import { CommentsPanel } from "./CommentsPanel";
 import { HistoryPanel } from "./HistoryPanel";
@@ -15,10 +26,20 @@ import { ShareDialog } from "./ShareDialog";
 import { Toolbar } from "./Toolbar";
 
 const AUTOSAVE_DELAY_MS = 800;
-const HEARTBEAT_MS = 5000;
+/** Heartbeat interval when nobody else has the document open. */
+const HEARTBEAT_ALONE_MS = 5000;
+/** Faster when others are here, so their cursors and edits keep up. */
+const HEARTBEAT_TOGETHER_MS = 1500;
+/** After the cursor moves, send it this soon (but no more often). */
+const CURSOR_SEND_DELAY_MS = 300;
 
 type SaveStatus = "saved" | "dirty" | "saving" | "error" | "conflict";
-type PendingChanges = { title?: string; content?: DocContent };
+type PendingChanges = {
+  title?: string;
+  content?: DocContent;
+  /** Local edit count when `content` was captured (see remote-cursors.ts). */
+  editCount?: number;
+};
 type Panel = "comments" | "history" | null;
 
 const STATUS_TEXT: Record<SaveStatus, string> = {
@@ -59,6 +80,12 @@ export function DocumentEditor({
   const saving = useRef(false);
   const stopped = useRef(false); // set after a conflict; no further saves
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Only share a cursor once the user has actually clicked into the text. */
+  const hasFocused = useRef(false);
+  /** Set by the heartbeat effect: send a heartbeat soon because the cursor moved. */
+  const requestBeat = useRef<() => void>(() => {});
+  /** The editor, for callbacks created before it exists. */
+  const editorRef = useRef<Editor | null>(null);
 
   const url = `/api/documents/${doc.id}`;
 
@@ -76,12 +103,19 @@ export function DocumentEditor({
         const changes = pending.current;
         pending.current = null;
         setStatus("saving");
+        const { editCount: savedEdits, ...fields } = changes;
         try {
           const saved = await api<{ version: number }>(url, {
             method: "PATCH",
-            body: JSON.stringify({ ...changes, baseVersion: version.current }),
+            body: JSON.stringify({ ...fields, baseVersion: version.current }),
           });
           version.current = saved.version;
+          // The saved version now includes these edits; other people's cursors
+          // are measured against it from here on.
+          const editor = editorRef.current;
+          if (savedEdits !== undefined && editor && !editor.isDestroyed) {
+            editor.view.dispatch(rebaseAfterSave(editor.state, savedEdits));
+          }
           setErrorText(null);
         } catch (error) {
           if (error instanceof ApiError && error.status === 409) {
@@ -114,13 +148,23 @@ export function DocumentEditor({
   );
 
   const editor = useEditor({
-    extensions: editorExtensions,
+    extensions: [...editorExtensions, RemoteCursors],
     content: doc.content,
     editable,
     immediatelyRender: false, // required for server-rendered pages
     editorProps: { attributes: { "aria-label": "Document content" } },
-    onUpdate: ({ editor }) => queue({ content: editor.getJSON() as DocContent }),
+    onUpdate: ({ editor }) =>
+      queue({ content: editor.getJSON() as DocContent, editCount: editCount(editor.state) }),
+    onFocus: () => {
+      hasFocused.current = true;
+      requestBeat.current();
+    },
+    onSelectionUpdate: () => requestBeat.current(),
   });
+
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
 
   /**
    * Replaces what's on screen with the server's copy. Used when someone else
@@ -130,11 +174,17 @@ export function DocumentEditor({
     (fresh: Pick<DocumentDetail, "title" | "content" | "version">) => {
       if (!editor) return;
       version.current = fresh.version;
-      const { from, to } = editor.state.selection;
+      const before = editor.state;
       editor.commands.setContent(fresh.content, { emitUpdate: false });
-      // Put the cursor back roughly where it was instead of jumping to the end.
+      editor.view.dispatch(resetToSaved(editor.state)); // nothing unsaved now
+      // Keep our own caret on the same text, rather than at the same number,
+      // when someone else's edit is pulled in.
+      const map = mapAcrossReplace(before.doc, editor.state.doc);
       const max = editor.state.doc.content.size;
-      editor.commands.setTextSelection({ from: Math.min(from, max), to: Math.min(to, max) });
+      editor.commands.setTextSelection({
+        from: Math.min(map(before.selection.from), max),
+        to: Math.min(map(before.selection.to), max),
+      });
       setTitle(fresh.title);
       stopped.current = false;
       setStatus("saved");
@@ -142,31 +192,76 @@ export function DocumentEditor({
     [editor],
   );
 
-  // Presence heartbeat. One poll every few seconds tells the server this tab
-  // is open, and brings back who else is here, the open comment count and the
-  // saved version. If the saved version is ahead and this tab has no unsaved
-  // work, the new content is pulled in, so viewers see edits within seconds.
+  // Presence heartbeat. A poll every 1.5-5 seconds tells the server this tab
+  // is open and where its cursor is, and brings back who else is here (with
+  // their cursors), the open comment count and the saved version. If the saved
+  // version is ahead and this tab has no unsaved work, the new content is
+  // pulled in, so others see edits within a couple of seconds.
   useEffect(() => {
     if (!editor) return;
     let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let nextAt = Infinity;
+    let inFlight = false;
+    let resendAfter = false;
+    let othersHere = false;
+
+    const idle = () => !pending.current && !saving.current && !stopped.current;
+
+    /**
+     * Cursor positions only mean something against the same document. A
+     * cursor taken against a different saved version (because one side
+     * hasn't caught up yet) is hidden until the next heartbeat.
+     */
+    const showCursors = (hb: Heartbeat) => {
+      if (editor.isDestroyed) return;
+      const cursors: RemoteCursor[] = hb.viewers.flatMap((viewer) =>
+        viewer.cursor && viewer.cursor.version === version.current
+          ? [
+              {
+                userId: viewer.userId,
+                name: viewer.name,
+                color: colorFor(viewer.userId),
+                anchor: viewer.cursor.anchor,
+                head: viewer.cursor.head,
+              },
+            ]
+          : [],
+      );
+      editor.view.dispatch(setRemoteCursors(editor.state, cursors));
+    };
 
     const beat = async () => {
       if (document.hidden) return;
+      // Sent in the saved version's coordinates, so it lines up for others
+      // even while this tab has unsaved typing.
+      const { state } = editor;
+      const cursor = hasFocused.current
+        ? {
+            anchor: toSavedPosition(state, state.selection.anchor),
+            head: toSavedPosition(state, state.selection.head),
+            version: version.current,
+          }
+        : null;
       try {
-        const hb = await api<Heartbeat>(`${url}/presence`, { method: "POST" });
+        const hb = await api<Heartbeat>(`${url}/presence`, {
+          method: "POST",
+          body: JSON.stringify({ cursor }),
+        });
         if (cancelled) return;
+        othersHere = hb.viewers.length > 0;
         setViewers(hb.viewers);
         setOpenComments(hb.openComments);
         if (hb.access !== doc.access) {
           setAccessNotice("Your access to this document has changed. Reload to continue.");
           return;
         }
-        const idle = () => !pending.current && !saving.current && !stopped.current;
         if (hb.version > version.current && idle()) {
           const fresh = await api<DocumentDetail>(url);
           // Re-check: the user may have started typing while this was loading.
           if (!cancelled && idle() && fresh.version > version.current) applyRemote(fresh);
         }
+        if (!cancelled) showCursors(hb);
       } catch (error) {
         if (!cancelled && error instanceof ApiError && error.status === 404) {
           stopped.current = true;
@@ -176,17 +271,50 @@ export function DocumentEditor({
       }
     };
 
-    beat();
-    const interval = setInterval(beat, HEARTBEAT_MS);
-    document.addEventListener("visibilitychange", beat);
+    const schedule = (ms: number) => {
+      clearTimeout(timeoutId);
+      nextAt = Date.now() + ms;
+      timeoutId = setTimeout(run, ms);
+    };
+
+    // One heartbeat in flight at a time; the next is scheduled when it returns.
+    const run = async () => {
+      if (cancelled) return;
+      inFlight = true;
+      await beat();
+      inFlight = false;
+      if (cancelled) return;
+      if (resendAfter) {
+        resendAfter = false;
+        schedule(CURSOR_SEND_DELAY_MS);
+      } else {
+        schedule(othersHere ? HEARTBEAT_TOGETHER_MS : HEARTBEAT_ALONE_MS);
+      }
+    };
+
+    // Cursor moved: bring the next heartbeat forward, but only when someone is
+    // here to see it, and never more often than CURSOR_SEND_DELAY_MS.
+    requestBeat.current = () => {
+      if (!othersHere) return;
+      if (inFlight) resendAfter = true;
+      else if (nextAt - Date.now() > CURSOR_SEND_DELAY_MS) schedule(CURSOR_SEND_DELAY_MS);
+    };
+
+    const onVisibilityChange = () => {
+      if (!document.hidden && !inFlight) schedule(0);
+    };
     const leave = () => {
       fetch(`${url}/presence`, { method: "DELETE", keepalive: true }).catch(() => {});
     };
+
+    run();
+    document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("pagehide", leave);
     return () => {
       cancelled = true;
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", beat);
+      clearTimeout(timeoutId);
+      requestBeat.current = () => {};
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("pagehide", leave);
       leave();
     };
@@ -267,7 +395,8 @@ export function DocumentEditor({
                 <span
                   key={viewer.userId}
                   title={`${viewer.name} has this document open`}
-                  className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-600 text-xs font-semibold text-white ring-2 ring-white"
+                  style={{ backgroundColor: colorFor(viewer.userId) }}
+                  className="flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold text-white ring-2 ring-white"
                 >
                   {viewer.name[0]}
                 </span>

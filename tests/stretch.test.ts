@@ -18,6 +18,7 @@ import {
 } from "@/lib/documents";
 import { exportFilename, toMarkdown } from "@/lib/markdown";
 import { heartbeat, leave, PRESENCE_TTL_MS } from "@/lib/presence";
+import { heartbeatSchema } from "@/lib/validation";
 import { getVersion, listVersions, restoreVersion } from "@/lib/versions";
 import { ALICE, BOB, CAROL, createTestDb } from "./helpers";
 
@@ -136,17 +137,41 @@ describe("presence", () => {
     await shareWithBob("viewer");
     const t0 = Date.now();
 
-    expect((await heartbeat(db, ALICE, docId, t0)).viewers).toEqual([]);
-    expect((await heartbeat(db, BOB, docId, t0)).viewers).toEqual([
-      { userId: ALICE, name: "Alice Chen" },
+    expect((await heartbeat(db, ALICE, docId, { now: t0 })).viewers).toEqual([]);
+    expect((await heartbeat(db, BOB, docId, { now: t0 })).viewers).toEqual([
+      { userId: ALICE, name: "Alice Chen", cursor: null },
     ]);
 
     // Alice stops sending heartbeats.
     const later = t0 + PRESENCE_TTL_MS + 1;
-    expect((await heartbeat(db, BOB, docId, later)).viewers).toEqual([]);
+    expect((await heartbeat(db, BOB, docId, { now: later })).viewers).toEqual([]);
 
     await leave(db, BOB, docId);
-    expect((await heartbeat(db, ALICE, docId, later)).viewers).toEqual([]);
+    expect((await heartbeat(db, ALICE, docId, { now: later })).viewers).toEqual([]);
+  });
+
+  it("shares each person's latest cursor with the others", async () => {
+    await shareWithBob("editor");
+    const cursor = { anchor: 3, head: 8, version: 1 };
+
+    await heartbeat(db, ALICE, docId, { cursor });
+    expect((await heartbeat(db, BOB, docId)).viewers).toEqual([
+      { userId: ALICE, name: "Alice Chen", cursor },
+    ]);
+    // A user never sees their own cursor in the list.
+    expect((await heartbeat(db, ALICE, docId, { cursor })).viewers).toEqual([
+      expect.objectContaining({ userId: BOB, cursor: null }),
+    ]);
+
+    // Moving the cursor replaces it; clearing it hides it.
+    await heartbeat(db, ALICE, docId, { cursor: { anchor: 5, head: 5, version: 2 } });
+    expect((await heartbeat(db, BOB, docId)).viewers[0].cursor).toEqual({
+      anchor: 5,
+      head: 5,
+      version: 2,
+    });
+    await heartbeat(db, ALICE, docId, { cursor: null });
+    expect((await heartbeat(db, BOB, docId)).viewers[0].cursor).toBeNull();
   });
 
   it("reports the saved version and open comment count, and requires access", async () => {
@@ -155,6 +180,42 @@ describe("presence", () => {
 
     expect(await heartbeat(db, ALICE, docId)).toMatchObject({ version: 2, openComments: 1 });
     await expect(heartbeat(db, CAROL, docId)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("heartbeat validation", () => {
+  it("accepts a missing or null cursor and rejects malformed positions", () => {
+    expect(heartbeatSchema.parse({})).toEqual({});
+    expect(heartbeatSchema.parse({ cursor: null })).toEqual({ cursor: null });
+    expect(() => heartbeatSchema.parse({ cursor: { anchor: -1, head: 0, version: 1 } })).toThrow();
+    expect(() => heartbeatSchema.parse({ cursor: { anchor: 1.5, head: 0, version: 1 } })).toThrow();
+    expect(() => heartbeatSchema.parse({ cursor: { anchor: 1, head: 1 } })).toThrow();
+  });
+});
+
+describe("upgrading an existing database", () => {
+  it("adds the cursor columns to a presence table created before they existed", async () => {
+    const { createClient } = await import("@libsql/client");
+    const { initDb } = await import("@/db/client");
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const client = createClient({
+      url: `file:${join(mkdtempSync(join(tmpdir(), "ajaia-upgrade-")), "old.db")}`,
+    });
+    await client.execute(`CREATE TABLE presence (
+      document_id TEXT NOT NULL, user_id TEXT NOT NULL, last_seen INTEGER NOT NULL,
+      PRIMARY KEY (document_id, user_id))`);
+
+    const upgraded = await initDb(client);
+    const { id } = await createDocument(upgraded, ALICE);
+    await heartbeat(upgraded, ALICE, id, { cursor: { anchor: 1, head: 1, version: 1 } });
+    expect((await heartbeat(upgraded, BOB, id).catch(() => null))).toBeNull(); // Bob has no access
+    const columns = await client.execute("PRAGMA table_info(presence)");
+    expect(columns.rows.map((row) => row.name)).toEqual(
+      expect.arrayContaining(["cursor_anchor", "cursor_head", "cursor_version"]),
+    );
   });
 });
 

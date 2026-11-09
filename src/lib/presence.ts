@@ -3,13 +3,16 @@ import type { Db } from "@/db/client";
 import { comments, presence, users } from "@/db/schema";
 import type { Access } from "./access";
 import { loadWithAccess } from "./documents";
+import type { CursorPosition } from "./validation";
 
 /** A user counts as present if they sent a heartbeat this recently. */
 export const PRESENCE_TTL_MS = 15_000;
 
+export type Viewer = { userId: string; name: string; cursor: CursorPosition | null };
+
 export type Heartbeat = {
-  /** Other people who currently have the document open. */
-  viewers: { userId: string; name: string }[];
+  /** Other people who currently have the document open, with their cursors. */
+  viewers: Viewer[];
   /** Current saved version, so an open tab can notice it is behind. */
   version: number;
   openComments: number;
@@ -17,28 +20,42 @@ export type Heartbeat = {
 };
 
 /**
- * Records that the user has the document open and returns who else does.
- * This is polled every few seconds: it gives "who's here" and near-live
- * updates without a WebSocket server, which serverless hosting can't hold open.
+ * Records that the user has the document open (and where their cursor is),
+ * and returns who else does. This is polled every few seconds: it gives
+ * "who's here", cursors and near-live updates without a WebSocket server,
+ * which serverless hosting can't hold open.
  */
 export async function heartbeat(
   db: Db,
   userId: string,
   documentId: string,
-  now = Date.now(),
+  options: { cursor?: CursorPosition | null; now?: number } = {},
 ): Promise<Heartbeat> {
+  const now = options.now ?? Date.now();
   const { doc, access } = await loadWithAccess(db, userId, documentId);
 
+  const cursor = options.cursor ?? null;
+  const cursorColumns = {
+    cursorAnchor: cursor?.anchor ?? null,
+    cursorHead: cursor?.head ?? null,
+    cursorVersion: cursor?.version ?? null,
+  };
   await db
     .insert(presence)
-    .values({ documentId, userId, lastSeen: now })
+    .values({ documentId, userId, lastSeen: now, ...cursorColumns })
     .onConflictDoUpdate({
       target: [presence.documentId, presence.userId],
-      set: { lastSeen: now },
+      set: { lastSeen: now, ...cursorColumns },
     });
 
-  const viewers = await db
-    .select({ userId: users.id, name: users.name })
+  const rows = await db
+    .select({
+      userId: users.id,
+      name: users.name,
+      anchor: presence.cursorAnchor,
+      head: presence.cursorHead,
+      version: presence.cursorVersion,
+    })
     .from(presence)
     .innerJoin(users, eq(users.id, presence.userId))
     .where(
@@ -49,6 +66,13 @@ export async function heartbeat(
       ),
     )
     .orderBy(users.name);
+
+  const viewers = rows.map(({ userId, name, anchor, head, version }) => ({
+    userId,
+    name,
+    cursor:
+      anchor !== null && head !== null && version !== null ? { anchor, head, version } : null,
+  }));
 
   const [{ count }] = await db
     .select({ count: sql<number>`count(*)` })

@@ -34,19 +34,25 @@ browser verification.
   small enhancement, then built each in its smallest useful form (polling instead of
   WebSockets, document-level comments instead of anchored ones, print-to-PDF instead of a
   PDF renderer) and documented what each is not.
+- **Cursor drift found in testing, not trusted from code.** The first version of shared
+  cursors looked right in a screenshot, but typing in front of another person's cursor
+  showed it a few characters off until the next save. The fix exchanges positions against
+  the last saved version and maps them through unsaved edits; it was then covered with unit
+  tests against the real editor schema before being re-checked in the browser.
 - **Flaky ordering caught.** Version history was first ordered by timestamp alone. Two saves
   in the same millisecond could swap, so a row-order tiebreak was added before it showed up
   as an intermittent test failure.
 
 ## How correctness was checked
 
-- `npm test`: 28 tests against a real SQLite database.
+- `npm test`: 40 tests, most against a real SQLite database.
 - `npm run typecheck`, `npm run lint` and `npm run build` all pass.
 - Manual browser run of the main flow as two users, including: formatting survives a
   reload; a viewer gets a read-only page and a 403 from the API; a user with no access gets
   a 404 for both the page and the API; unsupported uploads and stale saves return clear errors.
 - Stretch features were checked with two users at once (one in the browser, one through
   the API): presence avatar, live update of an idle tab, a viewer's quoted comment, and
-  preview and restore of an older version followed by further editing.
+  preview and restore of an older version followed by further editing. Shared cursors were
+  checked in both directions, including while one side had unsaved typing.
 - Not verified: the production deployment, behaviour on mobile browsers, the printed PDF
   layout, and the save-conflict banner with two real browser windows.

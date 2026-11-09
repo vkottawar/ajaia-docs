@@ -76,16 +76,34 @@ permission path.
 | Feature | How it works | What it deliberately isn't |
 |---|---|---|
 | Role-based sharing | `viewer` / `editor` on the share row. | No per-section or link-based permissions. |
-| Collaboration indicators | Each open tab posts a heartbeat every 5 s (`src/lib/presence.ts`). The reply lists other people seen in the last 15 s, the saved version and the open comment count. A tab with no unsaved work pulls in a newer version automatically. | Not live cursors or merged typing. Polling was chosen because serverless hosting can't hold WebSockets open, and the version check already prevents overwrites. |
+| Collaboration indicators | Each open tab posts a heartbeat (`src/lib/presence.ts`) with its cursor: every 5 s when alone, every 1.5 s when others are present, and within 300 ms of a cursor move. The reply lists other people seen in the last 15 s with their cursors, the saved version and the open comment count. Other people's carets and selections are drawn as editor decorations (`src/lib/remote-cursors.ts`). A tab with no unsaved work pulls in a newer version automatically. | Not merged simultaneous typing. Polling was chosen because serverless hosting can't hold WebSockets open, and the version check already prevents overwrites. |
 | Comments | Document-level thread with an optional quote of the selected text. Viewers can comment; author or editors resolve; author or owner delete. | Not anchored to a text range, so a quote doesn't follow later edits. No suggestion mode. |
 | Version history | `recordVersion()` runs on every save. Saves by one person within two minutes overwrite one snapshot, so autosave doesn't create hundreds. Capped at 50 per document. Restore writes the old content as a new version, so it is itself undoable. | No diff view between versions. |
 | Export | Markdown from a small hand-written serializer (`src/lib/markdown.ts`); PDF through a print stylesheet and the browser's print dialog. | No server-rendered PDF, which would need a headless browser. |
+
+### Cursor positions
+
+A cursor is just a number (an offset into the document), and two tabs only agree on those
+numbers if they have the same text. Each tab can have up to a second of unsaved typing,
+so positions are exchanged in the coordinates of the **last saved version**:
+
+- The cursor plugin records the step map of every local edit since that version.
+- Outgoing, our cursor is mapped backwards through those edits; incoming cursors are mapped
+  forwards through them. So someone's caret stays on the same word while you type in front
+  of it.
+- When a save completes, the edits it covered are folded in; cursors from a different
+  saved version are hidden until the next heartbeat.
+- When someone else's save is pulled in, your own caret is kept on the same text by diffing
+  the old and new documents (`mapAcrossReplace`).
+
+The first version skipped this and showed cursors a few characters off during typing. It
+was caught in browser testing and is now covered by `tests/remote-cursors.test.ts`.
 
 ## What I cut, on purpose
 
 | Cut | Why |
 |---|---|
-| Character-level co-editing (CRDT/OT, live cursors) | The largest feature in Google Docs; not achievable well in the timebox. Presence polling plus the version check covers awareness and data loss. |
+| Character-level co-editing (CRDT/OT) | The largest feature in Google Docs; not achievable well in the timebox. Presence and cursors over polling, plus the version check, cover awareness and data loss. |
 | Real authentication | Seeded users demonstrate sharing without account-creation friction for reviewers. |
 | Suggestion mode, anchored comments, version diffs | Each needs editor-level work (decorations, position mapping) beyond the stretch scope. |
 | Images, tables, attachments | Each needs storage and editor work; import drops them and the README says so. |
@@ -103,12 +121,15 @@ permission path.
 
 ## Testing
 
-`npm test` runs 28 Vitest tests against a real SQLite database (a temp file per test):
+`npm test` runs 40 Vitest tests against a real SQLite database (a temp file per test):
 
 - `tests/documents.test.ts`: owner / editor / viewer / stranger permissions, revocation,
   owned-vs-shared listing, role changes, validation of share targets, and the stale-save conflict.
 - `tests/stretch.test.ts`: version folding, restore and its permissions, comment
-  permissions for each role, presence expiry, cleanup on delete, and Markdown output.
+  permissions for each role, presence expiry and cursor sharing, upgrading an older
+  database, cleanup on delete, and Markdown output.
+- `tests/remote-cursors.test.ts`: cursor positions through unsaved typing, completed
+  saves and documents replaced by someone else's save, run against the real editor schema.
 - `tests/import.test.ts`: Markdown and Word conversion, stripping of unsafe content,
   and rejection of unsupported, empty and oversized files.
 

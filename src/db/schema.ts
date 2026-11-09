@@ -66,6 +66,11 @@ export const presence = sqliteTable(
     documentId: text("document_id").notNull(),
     userId: text("user_id").notNull(),
     lastSeen: integer("last_seen").notNull(),
+    /** Last known text selection in the editor; null until the user clicks in. */
+    cursorAnchor: integer("cursor_anchor"),
+    cursorHead: integer("cursor_head"),
+    /** The saved document version the positions were taken against. */
+    cursorVersion: integer("cursor_version"),
   },
   (t) => [primaryKey({ columns: [t.documentId, t.userId] })],
 );
