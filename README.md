@@ -83,15 +83,20 @@ asked to reload, rather than one person silently overwriting the other.
 
 ## Deploying (Vercel + Turso, both free)
 
-SQLite files don't persist on Vercel, so production uses a hosted libSQL database.
+Vercel's filesystem is read-only, so production needs a hosted libSQL database. Without
+one the app stops with "No database configured" in the Vercel logs.
 
-1. Create a database at [turso.tech](https://turso.tech) and copy its URL and an auth token.
-2. Import the repository into Vercel.
-3. Set these environment variables in the Vercel project:
-   - `DATABASE_URL` – `libsql://<your-db>.turso.io`
-   - `DATABASE_AUTH_TOKEN` – the Turso token
-   - `SESSION_SECRET` – a long random string (`openssl rand -base64 32`)
-4. Deploy. Tables and demo users are created on the first request.
+1. Import the repository into Vercel.
+2. Add a database, either way:
+   - **Turso integration (easiest):** in the Vercel project, Storage → Connect Database →
+     Turso. It sets `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`, which the app reads.
+   - **Manually:** create a database at [turso.tech](https://turso.tech), then set
+     `DATABASE_URL` (`libsql://<your-db>.turso.io`) and `DATABASE_AUTH_TOKEN` in the
+     project's environment variables.
+3. Set `SESSION_SECRET` to a long random string (`openssl rand -base64 32`).
+4. Redeploy. Environment variable changes only apply to new deployments.
+
+Tables and demo users are created on the first request.
 
 ## Known limits
 
