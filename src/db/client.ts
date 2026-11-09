@@ -103,6 +103,25 @@ export async function initDb(client: Client): Promise<Db> {
   return drizzle(client, { schema });
 }
 
+export function databaseConfig(
+  env: Record<string, string | undefined> = process.env,
+): { url: string; authToken: string | undefined } {
+  const url = env.DATABASE_URL || env.TURSO_DATABASE_URL;
+  const authToken = env.DATABASE_AUTH_TOKEN || env.TURSO_AUTH_TOKEN;
+
+  if (url) {
+    return { url, authToken };
+  }
+
+  if (env.VERCEL) {
+    throw new Error(
+      "Missing database configuration on Vercel: set DATABASE_URL (and DATABASE_AUTH_TOKEN) or connect Turso to set TURSO_DATABASE_URL (and TURSO_AUTH_TOKEN).",
+    );
+  }
+
+  return { url: "file:local.db", authToken: undefined };
+}
+
 export function createDb(url: string, authToken?: string): Promise<Db> {
   return initDb(createClient({ url, authToken }));
 }
@@ -111,9 +130,9 @@ export function createDb(url: string, authToken?: string): Promise<Db> {
 const globalForDb = globalThis as unknown as { __db?: Promise<Db> };
 
 export function getDb(): Promise<Db> {
-  globalForDb.__db ??= createDb(
-    process.env.DATABASE_URL ?? "file:local.db",
-    process.env.DATABASE_AUTH_TOKEN,
-  );
+  if (!globalForDb.__db) {
+    const { url, authToken } = databaseConfig(process.env);
+    globalForDb.__db = createDb(url, authToken);
+  }
   return globalForDb.__db;
 }
